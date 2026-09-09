@@ -5,6 +5,7 @@ type Body = {
   currentWeightKg?: number;
   maxCapacityKg?: number;
   avgPersonKg?: number;
+  maxPeople?: number;
 };
 
 type SpaceAnalysis = {
@@ -16,6 +17,8 @@ type SpaceAnalysis = {
 
 type FinalResult = SpaceAnalysis & {
   decision: "STOP" | "SKIP";
+  maxPeople: number;
+  roomForMore: number;
   weight: {
     currentKg: number;
     maxKg: number;
@@ -26,41 +29,31 @@ type FinalResult = SpaceAnalysis & {
   decisionReason: string;
 };
 
-async function analyzeLiftImage(imageDataUrl: string): Promise<SpaceAnalysis> {
+async function analyzeLiftImage(
+  imageDataUrl: string,
+  maxPeople: number
+): Promise<SpaceAnalysis> {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error("GEMINI_API_KEY environment variable is not set.");
-  }
+  if (!apiKey) throw new Error("GEMINI_API_KEY environment variable is not set.");
 
   const matches = imageDataUrl.match(/^data:(image\/\w+);base64,(.+)$/);
-  if (!matches) {
-    throw new Error("Invalid image data URL format.");
-  }
+  if (!matches) throw new Error("Invalid image data URL format.");
   const mimeType = matches[1];
   const base64Data = matches[2];
 
-  const prompt = \`You are an elevator occupancy detection system. Your job is to analyze a photo taken inside an elevator cabin and estimate how full it is.
+  const prompt = \`You are an elevator occupancy counter. Count every person visible in this elevator photo.
 
-STEP 1 — Count people: Look carefully at the image. Count every person you can see, including partial views (someone's shoulder, legs, etc.). If you see no people at all, count is 0.
+Rules:
+- Count each person once, even if partially visible (a shoulder, legs, or back counts as a person).
+- If the image is clearly NOT an elevator interior, set peopleCount to -1.
+- An empty elevator = 0 people.
 
-STEP 2 — Estimate floor space used: Imagine the floor of the elevator as a grid. What percentage of that floor area is covered by people's feet and bodies?
-- 0 people = 0%
-- 1 person in a standard elevator = roughly 15-25%
-- 2 people = roughly 30-45%
-- 3 people = roughly 45-60%
-- 4-5 people = roughly 65-80%
-- 6+ people or very crowded = 80-100%
+This elevator allows a maximum of \${maxPeople} people.
 
-STEP 3 — Decide if one more person can fit: Could one additional adult step into the elevator without it being dangerously overcrowded? Be generous — if there's any reasonable floor space left, say true.
-
-STEP 4 — If the image is NOT an elevator interior (e.g. a street, room, office, outdoor scene), set occupancyPercent to 0, peopleCount to 0, spaceForOneMore to false, and explain in reasoning.
-
-Respond with ONLY this JSON, no other text:
+Respond with ONLY this JSON object, no other text:
 {
-  "occupancyPercent": <number 0-100>,
-  "peopleCount": <number>,
-  "spaceForOneMore": <true or false>,
-  "reasoning": "<one sentence: what you see and why you gave this occupancy estimate>"
+  "peopleCount": <integer, number of people you can see>,
+  "reasoning": "<one sentence: describe what you see>"
 }\`;
 
   const response = await fetch(
@@ -72,19 +65,14 @@ Respond with ONLY this JSON, no other text:
         contents: [
           {
             parts: [
-              {
-                inline_data: {
-                  mime_type: mimeType,
-                  data: base64Data,
-                },
-              },
+              { inline_data: { mime_type: mimeType, data: base64Data } },
               { text: prompt },
             ],
           },
         ],
         generationConfig: {
           temperature: 0,
-          maxOutputTokens: 300,
+          maxOutputTokens: 150,
           responseMimeType: "application/json",
         },
       }),
@@ -93,40 +81,37 @@ Respond with ONLY this JSON, no other text:
 
   if (!response.ok) {
     const errorText = await response.text();
-    if (response.status === 429) {
+    if (response.status === 429)
       throw new Error("Gemini rate limit reached. Please wait a moment and try again.");
-    }
     throw new Error(\`Gemini API error (\${response.status}): \${errorText.slice(0, 200)}\`);
   }
 
   const data = await response.json() as {
-    candidates?: Array<{
-      content?: {
-        parts?: Array<{ text?: string }>;
-      };
-    }>;
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
   };
 
   const raw = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
-  if (!raw) {
-    throw new Error("Gemini returned an empty response.");
-  }
-
+  if (!raw) throw new Error("Gemini returned an empty response.");
   const cleaned = raw.replace(/^```json\s*/i, "").replace(/```\$/m, "").trim();
 
-  let space: SpaceAnalysis;
+  let parsed: { peopleCount: number; reasoning: string };
   try {
-    space = JSON.parse(cleaned) as SpaceAnalysis;
+    parsed = JSON.parse(cleaned);
   } catch {
     throw new Error(\`Gemini returned unparseable JSON: \${cleaned.slice(0, 200)}\`);
   }
 
-  space.occupancyPercent = Math.min(100, Math.max(0, Math.round(Number(space.occupancyPercent) || 0)));
-  space.peopleCount = Math.max(0, Math.round(Number(space.peopleCount) || 0));
-  space.spaceForOneMore = Boolean(space.spaceForOneMore);
-  space.reasoning = String(space.reasoning || "No reasoning provided.");
+  const isNotElevator = Number(parsed.peopleCount) === -1;
+  const peopleCount = isNotElevator ? 0 : Math.max(0, Math.round(Number(parsed.peopleCount) || 0));
+  const occupancyPercent = isNotElevator ? 0 : Math.min(100, Math.round((peopleCount / Math.max(1, maxPeople)) * 100));
+  const spaceForOneMore = !isNotElevator && peopleCount < maxPeople;
 
-  return space;
+  return {
+    occupancyPercent,
+    peopleCount,
+    spaceForOneMore,
+    reasoning: String(parsed.reasoning || "No reasoning provided."),
+  };
 }
 
 export const Route = createFileRoute("/api/analyze")({
@@ -139,6 +124,7 @@ export const Route = createFileRoute("/api/analyze")({
           currentWeightKg = 0,
           maxCapacityKg = 630,
           avgPersonKg = 70,
+          maxPeople = 10,
         } = body;
 
         if (!imageDataUrl || !imageDataUrl.startsWith("data:image/")) {
@@ -147,7 +133,7 @@ export const Route = createFileRoute("/api/analyze")({
 
         let space: SpaceAnalysis;
         try {
-          space = await analyzeLiftImage(imageDataUrl);
+          space = await analyzeLiftImage(imageDataUrl, maxPeople);
         } catch (error) {
           const message = error instanceof Error ? error.message : "Vision analysis failed.";
           console.error("Vision analysis failed:", error);
@@ -156,31 +142,35 @@ export const Route = createFileRoute("/api/analyze")({
 
         const remainingKg = Math.max(0, maxCapacityKg - currentWeightKg);
         const loadPercent = Math.round(
-          Math.min(100, Math.max(0, (currentWeightKg / Math.max(1, maxCapacityKg)) * 100)),
+          Math.min(100, Math.max(0, (currentWeightKg / Math.max(1, maxCapacityKg)) * 100))
         );
         const weightAllowsOneMore = remainingKg >= avgPersonKg;
+        const roomForMore = Math.max(0, maxPeople - space.peopleCount);
+        const peopleAtMax = space.peopleCount >= maxPeople;
 
         let decision: "STOP" | "SKIP";
         let decisionReason: string;
 
-        if (!space.spaceForOneMore && !weightAllowsOneMore) {
+        if (peopleAtMax && !weightAllowsOneMore) {
           decision = "SKIP";
-          decisionReason = \`No physical room (≈\${space.occupancyPercent}% full) AND only \${remainingKg} kg left under capacity.\`;
-        } else if (!space.spaceForOneMore) {
+          decisionReason = \`At capacity: \${space.peopleCount}/\${maxPeople} people AND weight at \${loadPercent}% — no room.\`;
+        } else if (peopleAtMax) {
           decision = "SKIP";
-          decisionReason = \`Weight is fine (\${remainingKg} kg spare) but the cabin is visually packed — no room to step in.\`;
+          decisionReason = \`At capacity: \${space.peopleCount}/\${maxPeople} people detected — lift is full by headcount.\`;
         } else if (!weightAllowsOneMore) {
           decision = "SKIP";
-          decisionReason = \`Looks like there's floor space, but weight is at \${loadPercent}% — only \${remainingKg} kg left, under the \${avgPersonKg} kg-per-person budget.\`;
+          decisionReason = \`Only \${space.peopleCount}/\${maxPeople} people but weight is at \${loadPercent}% — only \${remainingKg} kg left.\`;
         } else {
           decision = "STOP";
-          decisionReason = \`Space available (≈\${100 - space.occupancyPercent}% free) and \${remainingKg} kg of weight headroom — safe to stop.\`;
+          decisionReason = \`\${space.peopleCount}/\${maxPeople} people — room for \${roomForMore} more. Weight headroom: \${remainingKg} kg.\`;
         }
 
         const result: FinalResult = {
           ...space,
           decision,
           decisionReason,
+          maxPeople,
+          roomForMore,
           weight: {
             currentKg: currentWeightKg,
             maxKg: maxCapacityKg,
