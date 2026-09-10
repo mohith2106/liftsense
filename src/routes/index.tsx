@@ -7,9 +7,9 @@ export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
       { title: "LiftSense — AI Lift Occupancy Simulator" },
-      { name: "description", content: "Upload or snap a lift interior photo. AI decides whether the lift should stop or skip the next floor call." },
+      { name: "description", content: "Upload a lift photo. AI decides whether to stop or skip — watch the animated elevator respond." },
       { property: "og:title", content: "LiftSense — AI Lift Occupancy Simulator" },
-      { property: "og:description", content: "See how an AI vision system could prevent a packed lift from stopping for new floor calls." },
+      { property: "og:description", content: "AI-powered lift occupancy simulator with animated elevator." },
     ],
   }),
   component: Home,
@@ -31,23 +31,6 @@ type AnalysisResult = {
   };
 };
 
-const FLOORS = 10;
-
-function floorY(f: number, shaftH: number) {
-  const TOP_PAD = 20, BOT_PAD = 20;
-  const usable = shaftH - TOP_PAD - BOT_PAD;
-  const floorH = usable / FLOORS;
-  return TOP_PAD + (FLOORS - f) * floorH;
-}
-
-function cabY(f: number, shaftH: number) {
-  const CAB_H = 36;
-  const TOP_PAD = 20, BOT_PAD = 20;
-  const usable = shaftH - TOP_PAD - BOT_PAD;
-  const floorH = usable / FLOORS;
-  return floorY(f, shaftH) + (floorH - CAB_H) / 2;
-}
-
 type ElevatorProps = {
   result: AnalysisResult | null;
   floor: number;
@@ -55,107 +38,208 @@ type ElevatorProps = {
 };
 
 function ElevatorShaft({ result, floor, loading }: ElevatorProps) {
-  const svgRef = useRef<SVGSVGElement>(null);
-  const animRef = useRef<number | null>(null);
-  const SHAFT_H = 440;
-  const CAB_H = 36;
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rafRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    if (!result) return;
-    const svg = svgRef.current;
-    if (!svg) return;
+  const FLOORS = 10;
+  const W = 220;
+  const H = 500;
+  const SHAFT_X = 65;
+  const SHAFT_W = 110;
+  const TOP = 20;
+  const BOT = 20;
+  const usable = H - TOP - BOT;
+  const fH = usable / FLOORS;
+  const CAB_H = Math.round(fH * 0.82);
+  const CAB_W = SHAFT_W - 8;
+  const CAB_X = SHAFT_X + 4;
 
-    const cabBox = svg.querySelector<SVGRectElement>("#cabBox");
-    const doorL = svg.querySelector<SVGLineElement>("#doorL");
-    const doorR = svg.querySelector<SVGLineElement>("#doorR");
-    const cabLbl = svg.querySelector<SVGTextElement>("#cabLbl");
-    const calledRect = svg.querySelector<SVGRectElement>("#calledRect");
-    const calledTxt = svg.querySelector<SVGTextElement>("#calledTxt");
-    if (!cabBox || !doorL || !doorR || !cabLbl || !calledRect || !calledTxt) return;
+  function floorTop(f: number) { return TOP + (FLOORS - f) * fH; }
+  function cabTop(f: number) { return floorTop(f) + (fH - CAB_H) / 2; }
 
-    if (animRef.current) cancelAnimationFrame(animRef.current);
+  function drawScene(
+    ctx: CanvasRenderingContext2D,
+    cabY: number,
+    doorOpen: number,
+    cabColor: string,
+    cabBorder: string,
+    calledFloor: number,
+    personX: number,
+    personVisible: boolean,
+    personTurnedAway: boolean,
+  ) {
+    ctx.clearRect(0, 0, W, H);
 
-    const calF = Math.max(1, Math.min(FLOORS, floor));
-    const fromF = 1;
-    const fromY = cabY(fromF, SHAFT_H);
-    const toY = cabY(calF, SHAFT_H);
-    const calFloorY = floorY(calF, SHAFT_H);
-    const TOP_PAD = 20, BOT_PAD = 20;
-    const floorH = (SHAFT_H - TOP_PAD - BOT_PAD) / FLOORS;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, W, H);
 
-    calledRect.setAttribute("y", String(calFloorY));
-    calledRect.setAttribute("height", String(floorH));
-    calledRect.setAttribute("opacity", "1");
-    calledTxt.setAttribute("y", String(calFloorY + floorH / 2 + 4));
-    calledTxt.setAttribute("opacity", "1");
+    ctx.fillStyle = "#f5f5f5";
+    ctx.strokeStyle = "#cccccc";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(SHAFT_X, TOP, SHAFT_W, usable, 6);
+    ctx.fill();
+    ctx.stroke();
 
-    cabBox.setAttribute("fill", "var(--surface-2)");
-    cabBox.setAttribute("stroke", "var(--border-strong)");
-    doorL.setAttribute("x1", "75"); doorL.setAttribute("x2", "75");
-    doorR.setAttribute("x1", "85"); doorR.setAttribute("x2", "85");
+    for (let f = 1; f <= FLOORS; f++) {
+      const y = floorTop(f);
+      ctx.strokeStyle = "#e0e0e0";
+      ctx.lineWidth = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(SHAFT_X, y);
+      ctx.lineTo(SHAFT_X + SHAFT_W, y);
+      ctx.stroke();
 
-    function setPos(y: number) {
-      cabBox.setAttribute("y", String(y));
-      cabLbl.setAttribute("y", String(y + CAB_H / 2 + 4));
-      doorL.setAttribute("y1", String(y + 2)); doorL.setAttribute("y2", String(y + CAB_H - 2));
-      doorR.setAttribute("y1", String(y + 2)); doorR.setAttribute("y2", String(y + CAB_H - 2));
+      ctx.fillStyle = "#999";
+      ctx.font = "10px system-ui";
+      ctx.textAlign = "right";
+      ctx.fillText(String(f), SHAFT_X - 5, y + fH / 2 + 4);
     }
 
-    setPos(fromY);
+    const cfy = floorTop(calledFloor);
+    ctx.fillStyle = "rgba(250,200,50,0.2)";
+    ctx.fillRect(SHAFT_X + 1, cfy, SHAFT_W - 2, fH);
+    ctx.fillStyle = "#b8860b";
+    ctx.font = "9px system-ui";
+    ctx.textAlign = "left";
+    ctx.fillText("called", SHAFT_X + SHAFT_W + 4, cfy + fH / 2 + 3);
 
-    const dur = Math.abs(calF - fromF) * 220 + 400;
-    let start: number | null = null;
+    ctx.fillStyle = cabColor;
+    ctx.strokeStyle = cabBorder;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(CAB_X, cabY, CAB_W, CAB_H, 4);
+    ctx.fill();
+    ctx.stroke();
 
-    function animate(ts: number) {
-      if (!start) start = ts;
-      const t = Math.min((ts - start) / dur, 1);
-      const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
-      setPos(fromY + (toY - fromY) * ease);
-      if (t < 1) { animRef.current = requestAnimationFrame(animate); return; }
-      setPos(toY);
+    const midX = CAB_X + CAB_W / 2;
+    const gap = doorOpen * (CAB_W * 0.38);
+    ctx.strokeStyle = "#444";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(midX - gap, cabY + 3);
+    ctx.lineTo(midX - gap, cabY + CAB_H - 3);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(midX + gap, cabY + 3);
+    ctx.lineTo(midX + gap, cabY + CAB_H - 3);
+    ctx.stroke();
 
-      if (result.decision === "STOP") {
-        cabBox.setAttribute("stroke", "var(--border-success)");
-        cabBox.setAttribute("fill", "var(--bg-success)");
-        setTimeout(() => {
-          doorL.setAttribute("x1", "57"); doorL.setAttribute("x2", "57");
-          doorR.setAttribute("x1", "103"); doorR.setAttribute("x2", "103");
-        }, 150);
-        setTimeout(() => {
-          doorL.setAttribute("x1", "75"); doorL.setAttribute("x2", "75");
-          doorR.setAttribute("x1", "85"); doorR.setAttribute("x2", "85");
-          cabBox.setAttribute("fill", "var(--surface-2)");
-          cabBox.setAttribute("stroke", "var(--border-strong)");
-        }, 2600);
-      } else {
-        cabBox.setAttribute("stroke", "var(--border-danger)");
-        cabBox.setAttribute("fill", "var(--bg-danger)");
-        setTimeout(() => {
-          const skipF = calF < FLOORS ? calF + 1 : calF - 1;
-          const skipY = cabY(skipF, SHAFT_H);
-          const skipDur = 500;
-          let s2: number | null = null;
-          function skip(ts2: number) {
-            if (!s2) s2 = ts2;
-            const t2 = Math.min((ts2 - s2) / skipDur, 1);
-            setPos(toY + (skipY - toY) * t2);
-            if (t2 < 1) { animRef.current = requestAnimationFrame(skip); return; }
-            setPos(skipY);
-            cabBox.setAttribute("fill", "var(--surface-2)");
-            cabBox.setAttribute("stroke", "var(--border-strong)");
-          }
-          animRef.current = requestAnimationFrame(skip);
-        }, 500);
+    ctx.fillStyle = "#666";
+    ctx.font = "10px system-ui";
+    ctx.textAlign = "center";
+    ctx.fillText("▲▼", midX, cabY + CAB_H / 2 + 4);
+
+    if (personVisible) {
+      const py = cabY + CAB_H + 2;
+      const col = personTurnedAway ? "#e24b4a" : "#2c2c2a";
+      ctx.strokeStyle = col;
+      ctx.fillStyle = col;
+      ctx.lineWidth = 2;
+      const s = 0.9;
+      ctx.beginPath();
+      ctx.arc(personX, py - 18 * s, 5 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(personX, py - 13 * s);
+      ctx.lineTo(personX, py - 4 * s);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(personX, py - 11 * s);
+      ctx.lineTo(personX - 7 * s, py - 7 * s);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(personX, py - 11 * s);
+      ctx.lineTo(personX + 7 * s, py - 7 * s);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(personX, py - 4 * s);
+      ctx.lineTo(personX - 5 * s, py + 4 * s);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(personX, py - 4 * s);
+      ctx.lineTo(personX + 5 * s, py + 4 * s);
+      ctx.stroke();
+
+      if (personTurnedAway) {
+        ctx.fillStyle = "#e24b4a";
+        ctx.font = "bold 13px system-ui";
+        ctx.textAlign = "center";
+        ctx.fillText("✕", personX, py - 32);
       }
     }
+  }
 
-    animRef.current = requestAnimationFrame(animate);
-    return () => { if (animRef.current) cancelAnimationFrame(animRef.current); };
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    if (!result) {
+      drawScene(ctx, cabTop(1), 0, "#ffffff", "#888888", floor, 15, true, false);
+      return;
+    }
+
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+
+    const calledF = Math.max(1, Math.min(FLOORS, floor));
+    const fromY = cabTop(1);
+    const toY = cabTop(calledF);
+    const travelDur = Math.max(500, Math.abs(calledF - 1) * 200);
+
+    function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
+    function easeInOut(t: number) { return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; }
+
+    type Phase = { dur: number; tick: (t: number) => void };
+    let phases: Phase[];
+
+    if (result.decision === "STOP") {
+      phases = [
+        { dur: travelDur, tick: t => drawScene(ctx, lerp(fromY, toY, easeInOut(t)), 0, "#ffffff", "#888888", calledF, 15, true, false) },
+        { dur: 50, tick: () => drawScene(ctx, toY, 0, "#e6f5ee", "#1d9e75", calledF, 15, true, false) },
+        { dur: 400, tick: t => drawScene(ctx, toY, t, "#e6f5ee", "#1d9e75", calledF, 15, true, false) },
+        { dur: 500, tick: t => drawScene(ctx, toY, 1, "#e6f5ee", "#1d9e75", calledF, lerp(15, CAB_X + CAB_W * 0.35, easeInOut(t)), true, false) },
+        { dur: 300, tick: () => drawScene(ctx, toY, 1, "#e6f5ee", "#1d9e75", calledF, CAB_X + CAB_W * 0.35, false, false) },
+        { dur: 400, tick: t => drawScene(ctx, toY, 1 - t, "#e6f5ee", "#1d9e75", calledF, CAB_X + CAB_W * 0.35, false, false) },
+        { dur: 600, tick: t => drawScene(ctx, lerp(toY, cabTop(calledF < FLOORS ? calledF + 1 : calledF - 1), easeInOut(t)), 0, "#ffffff", "#888888", calledF, 15, false, false) },
+      ];
+    } else {
+      const skipF = calledF < FLOORS ? calledF + 1 : calledF - 1;
+      phases = [
+        { dur: travelDur, tick: t => drawScene(ctx, lerp(fromY, toY, easeInOut(t)), 0, "#ffffff", "#888888", calledF, 15, true, false) },
+        { dur: 50, tick: () => drawScene(ctx, toY, 0, "#fcebeb", "#e24b4a", calledF, 15, true, false) },
+        { dur: 300, tick: t => drawScene(ctx, toY, 0, "#fcebeb", "#e24b4a", calledF, lerp(15, 8, t), true, true) },
+        { dur: 500, tick: () => drawScene(ctx, toY, 0, "#fcebeb", "#e24b4a", calledF, 8, true, true) },
+        { dur: 600, tick: t => drawScene(ctx, lerp(toY, cabTop(skipF), easeInOut(t)), 0, "#fcebeb", "#e24b4a", calledF, 8, true, true) },
+        { dur: 100, tick: () => drawScene(ctx, cabTop(skipF), 0, "#ffffff", "#888888", calledF, 8, false, false) },
+      ];
+    }
+
+    let pi = 0;
+    let phaseStart: number | null = null;
+
+    function step(ts: number) {
+      if (pi >= phases.length) return;
+      const ph = phases[pi];
+      if (!phaseStart) phaseStart = ts;
+      const raw = Math.min((ts - phaseStart) / ph.dur, 1);
+      ph.tick(raw);
+      if (raw < 1) { rafRef.current = requestAnimationFrame(step); }
+      else { pi++; phaseStart = null; rafRef.current = requestAnimationFrame(step); }
+    }
+
+    rafRef.current = requestAnimationFrame(step);
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
   }, [result, floor]);
 
-  const floorTickData = Array.from({ length: FLOORS }, (_, i) => i + 1);
-  const TOP_PAD = 20, BOT_PAD = 20;
-  const floorH = (SHAFT_H - TOP_PAD - BOT_PAD) / FLOORS;
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || result) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    drawScene(ctx, cabTop(1), 0, "#ffffff", "#888888", floor, 15, true, false);
+  }, [floor]);
 
   return (
     <div className="rounded-xl border border-border bg-card shadow-sm overflow-hidden">
@@ -174,69 +258,47 @@ function ElevatorShaft({ result, floor, loading }: ElevatorProps) {
       )}
 
       {loading && (
-        <div className="px-5 py-4">
-          <div className="flex items-center gap-3">
-            <div className="h-2 w-2 animate-pulse rounded-full bg-primary" />
-            <p className="text-sm text-muted-foreground">Scanning lift interior…</p>
-          </div>
+        <div className="px-5 py-4 flex items-center gap-3">
+          <div className="h-2 w-2 animate-pulse rounded-full bg-primary" />
+          <p className="text-sm text-muted-foreground">Scanning lift interior…</p>
         </div>
       )}
 
       {!result && !loading && (
         <div className="px-5 py-4 text-sm text-muted-foreground">
-          Run an analysis to see whether the lift would stop at floor <span className="font-medium text-foreground">{floor}</span>.
+          Run an analysis to see the lift respond at floor <span className="font-medium text-foreground">{floor}</span>.
         </div>
       )}
 
-      <div className="flex justify-center py-4 px-2">
-        <svg ref={svgRef} viewBox={`0 0 160 ${SHAFT_H}`} width="160" height={SHAFT_H} xmlns="http://www.w3.org/2000/svg">
-          <rect x="20" y="0" width="120" height={SHAFT_H} rx="4" fill="var(--surface-1)" stroke="var(--border)" strokeWidth="0.5" />
-          <line x1="20" y1="0" x2="20" y2={SHAFT_H} stroke="var(--border-strong)" strokeWidth="1" />
-          <line x1="140" y1="0" x2="140" y2={SHAFT_H} stroke="var(--border-strong)" strokeWidth="1" />
-          <line x1="78" y1="0" x2="78" y2={SHAFT_H} stroke="var(--border)" strokeWidth="0.5" strokeDasharray="2,6" />
-          <line x1="82" y1="0" x2="82" y2={SHAFT_H} stroke="var(--border)" strokeWidth="0.5" strokeDasharray="2,6" />
-
-          {floorTickData.map(f => {
-            const y = floorY(f, SHAFT_H);
-            return (
-              <g key={f}>
-                <line x1="20" x2="140" y1={y} y2={y} stroke="var(--border)" strokeWidth="0.5" />
-                <text x="10" y={y + floorH / 2 + 4} textAnchor="middle" fontSize="10" fill="var(--text-muted)" fontFamily="var(--font-sans, system-ui)">{f}</text>
-              </g>
-            );
-          })}
-
-          <rect id="calledRect" x="22" y="0" width="116" height={floorH} opacity="0" fill="var(--bg-warning)" />
-          <text id="calledTxt" x="80" y="0" textAnchor="middle" fontSize="10" fill="var(--text-warning)" fontFamily="var(--font-sans, system-ui)" opacity="0">floor called</text>
-
-          <g id="cab">
-            <rect id="cabBox" x="30" y={cabY(1, SHAFT_H)} width="100" height={CAB_H} rx="4" fill="var(--surface-2)" stroke="var(--border-strong)" strokeWidth="1" />
-            <line id="doorL" x1="75" x2="75" y1={cabY(1, SHAFT_H) + 2} y2={cabY(1, SHAFT_H) + CAB_H - 2} stroke="var(--border-stronger)" strokeWidth="1.5" style={{ transition: "x1 0.4s ease, x2 0.4s ease" }} />
-            <line id="doorR" x1="85" x2="85" y1={cabY(1, SHAFT_H) + 2} y2={cabY(1, SHAFT_H) + CAB_H - 2} stroke="var(--border-stronger)" strokeWidth="1.5" style={{ transition: "x1 0.4s ease, x2 0.4s ease" }} />
-            <text id="cabLbl" x="80" y={cabY(1, SHAFT_H) + CAB_H / 2 + 4} textAnchor="middle" fontSize="11" fill="var(--text-secondary)" fontFamily="var(--font-sans, system-ui)">▲▼</text>
-          </g>
-        </svg>
+      <div className="flex justify-center py-3">
+        <canvas
+          ref={canvasRef}
+          width={W}
+          height={H}
+          style={{ display: "block", borderRadius: "8px", border: "1px solid #e5e5e5" }}
+        />
       </div>
 
       {result && (
-        <div className="space-y-3 border-t border-border px-5 pb-5">
+        <div className="space-y-3 border-t border-border px-5 pb-5 pt-3">
           <div>
             <div className="flex items-baseline justify-between">
               <span className="text-xs uppercase tracking-widest text-muted-foreground">Visual occupancy</span>
               <span className="text-sm font-semibold tabular-nums">{result.occupancyPercent}%</span>
             </div>
-            <Bar percent={result.occupancyPercent} />
-          </div>
-          <div>
-            <div className="flex items-baseline justify-between">
-              <span className="text-xs uppercase tracking-widest text-muted-foreground">Weight</span>
-              <span className="text-sm font-semibold tabular-nums">{result.weight.currentKg}/{result.weight.maxKg} kg</span>
+            <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-muted">
+              <div className={`h-full transition-all ${result.occupancyPercent > 90 ? "bg-destructive" : result.occupancyPercent > 70 ? "bg-amber-500" : "bg-emerald-500"}`} style={{ width: `${result.occupancyPercent}%` }} />
             </div>
-            <Bar percent={result.weight.loadPercent} />
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <MiniStat label="People" value={String(result.peopleCount)} />
-            <MiniStat label="Room for one more" value={result.spaceForOneMore ? "Yes" : "No"} />
+            <div className="rounded-md border border-border bg-background px-3 py-2">
+              <p className="text-[10px] uppercase tracking-widest text-muted-foreground">People</p>
+              <p className="text-sm font-semibold">{result.peopleCount}</p>
+            </div>
+            <div className="rounded-md border border-border bg-background px-3 py-2">
+              <p className="text-[10px] uppercase tracking-widest text-muted-foreground">Room for one more</p>
+              <p className="text-sm font-semibold">{result.spaceForOneMore ? "Yes" : "No"}</p>
+            </div>
           </div>
           <div className="rounded-md bg-muted/60 p-3 text-xs leading-relaxed">
             <span className="font-semibold uppercase tracking-widest text-muted-foreground">AI · </span>
@@ -248,25 +310,6 @@ function ElevatorShaft({ result, floor, loading }: ElevatorProps) {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function Bar({ percent }: { percent: number }) {
-  const p = Math.min(100, Math.max(0, percent));
-  const color = p > 90 ? "bg-destructive" : p > 70 ? "bg-amber-500" : "bg-emerald-500";
-  return (
-    <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-muted">
-      <div className={`h-full transition-all ${color}`} style={{ width: `${p}%` }} />
-    </div>
-  );
-}
-
-function MiniStat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md border border-border bg-background px-3 py-2">
-      <p className="text-[10px] uppercase tracking-widest text-muted-foreground">{label}</p>
-      <p className="text-sm font-semibold">{value}</p>
     </div>
   );
 }
@@ -326,68 +369,48 @@ function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ imageDataUrl: url, currentWeightKg, maxCapacityKg, avgPersonKg }),
       });
-      if (!res.ok) {
-        const err = (await res.json().catch(() => ({}))) as { error?: string };
-        toast.error(err.error ?? `Analysis failed (${res.status})`);
-        return;
-      }
+      if (!res.ok) { const err = (await res.json().catch(() => ({}))) as { error?: string }; toast.error(err.error ?? `Analysis failed (${res.status})`); return; }
       setResult((await res.json()) as AnalysisResult);
     } catch { toast.error("Network error. Please try again."); }
   }
 
   function stopCamera() {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    setCameraOn(false);
-    setLiveMode(false);
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null; setCameraOn(false); setLiveMode(false);
   }
 
   async function startCamera() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
-      streamRef.current = stream;
-      setCameraOn(true);
-      setTimeout(() => {
-        if (videoRef.current) { videoRef.current.srcObject = stream; videoRef.current.play().catch(() => {}); }
-      }, 50);
+      streamRef.current = stream; setCameraOn(true);
+      setTimeout(() => { if (videoRef.current) { videoRef.current.srcObject = stream; videoRef.current.play().catch(() => {}); } }, 50);
     } catch { toast.error("Couldn't access camera. You can upload a photo instead."); }
   }
 
   function snap() {
-    const video = videoRef.current;
-    if (!video) return;
+    const video = videoRef.current; if (!video) return;
     const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    canvas.width = video.videoWidth || 640; canvas.height = video.videoHeight || 480;
+    const ctx = canvas.getContext("2d"); if (!ctx) return;
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    setImageDataUrl(canvas.toDataURL("image/jpeg", 0.85));
-    setResult(null);
-    stopCamera();
+    setImageDataUrl(canvas.toDataURL("image/jpeg", 0.85)); setResult(null); stopCamera();
   }
 
   async function handleFile(file: File) {
     if (file.size > 8 * 1024 * 1024) { toast.error("Image is too large. Please use one under 8 MB."); return; }
-    setImageDataUrl(await downscaleToDataUrl(file, 1024));
-    setResult(null);
+    setImageDataUrl(await downscaleToDataUrl(file, 1024)); setResult(null);
   }
 
   async function analyze() {
     if (!imageDataUrl) { toast.error("Upload or snap a photo first."); return; }
-    setLoading(true);
-    setResult(null);
+    setLoading(true); setResult(null);
     try {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ imageDataUrl, currentWeightKg, maxCapacityKg, avgPersonKg }),
       });
-      if (!res.ok) {
-        const err = (await res.json().catch(() => ({}))) as { error?: string };
-        toast.error(err.error ?? `Analysis failed (${res.status})`);
-        return;
-      }
+      if (!res.ok) { const err = (await res.json().catch(() => ({}))) as { error?: string }; toast.error(err.error ?? `Analysis failed (${res.status})`); return; }
       setResult((await res.json()) as AnalysisResult);
     } catch { toast.error("Network error. Please try again."); }
     finally { setLoading(false); }
@@ -396,7 +419,6 @@ function Home() {
   return (
     <main className="min-h-screen bg-background text-foreground">
       <Toaster richColors position="top-center" />
-
       <header className="border-b border-border/60 bg-card/40 backdrop-blur">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-5">
           <div className="flex items-center gap-3">
@@ -413,9 +435,7 @@ function Home() {
       <section className="mx-auto max-w-5xl px-6 py-10">
         <div className="max-w-2xl">
           <h2 className="text-3xl font-semibold tracking-tight sm:text-4xl">Should the lift stop, or skip this floor?</h2>
-          <p className="mt-3 text-muted-foreground">
-            Upload or snap a photo of a lift interior. The AI estimates how much physical space is left and decides whether it makes sense to stop for the next floor call.
-          </p>
+          <p className="mt-3 text-muted-foreground">Upload or snap a photo of a lift interior. The AI estimates how full it is — then watch the animated lift respond, with a stick figure boarding or being turned away.</p>
         </div>
 
         <div className="mt-8 grid gap-6 lg:grid-cols-5">
@@ -429,9 +449,8 @@ function Home() {
                   <button onClick={cameraOn ? stopCamera : startCamera} className="hidden rounded-md border border-border px-3 py-1.5 text-xs font-medium transition hover:bg-accent sm:inline-block">{cameraOn ? "Stop camera" : "Use webcam"}</button>
                 </div>
               </div>
-
-              <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void handleFile(f); e.target.value = ""; }} />
-              <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void handleFile(f); e.target.value = ""; }} />
+              <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) void handleFile(f); e.target.value = ""; }} />
+              <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) void handleFile(f); e.target.value = ""; }} />
 
               <div className="aspect-[4/3] w-full bg-muted/40">
                 {cameraOn ? (
@@ -445,7 +464,7 @@ function Home() {
                     )}
                     <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2">
                       <button onClick={snap} className="rounded-full bg-primary px-5 py-2 text-sm font-medium text-primary-foreground shadow-lg">Capture</button>
-                      <button onClick={() => setLiveMode((v) => !v)} className={`rounded-full px-4 py-2 text-sm font-medium shadow-lg backdrop-blur ${liveMode ? "bg-red-500 text-white" : "bg-white/90 text-foreground"}`}>{liveMode ? "Stop live" : "Go live"}</button>
+                      <button onClick={() => setLiveMode(v => !v)} className={`rounded-full px-4 py-2 text-sm font-medium shadow-lg backdrop-blur ${liveMode ? "bg-red-500 text-white" : "bg-white/90 text-foreground"}`}>{liveMode ? "Stop live" : "Go live"}</button>
                     </div>
                   </div>
                 ) : imageDataUrl ? (
@@ -465,19 +484,24 @@ function Home() {
                   <NumField id="cap" label="Max capacity (kg)" value={maxCapacityKg} onChange={setMaxCapacityKg} min={50} max={5000} />
                   <NumField id="avg" label="Avg person (kg)" value={avgPersonKg} onChange={setAvgPersonKg} min={20} max={200} />
                 </div>
-
-                <WeightBar current={currentWeightKg} max={maxCapacityKg} />
-
+                <div>
+                  <div className="flex items-baseline justify-between text-xs text-muted-foreground">
+                    <span>Weight sensor</span>
+                    <span className="tabular-nums">{currentWeightKg} / {maxCapacityKg} kg ({Math.round(Math.min(100, (currentWeightKg / Math.max(1, maxCapacityKg)) * 100))}%)</span>
+                  </div>
+                  <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-muted">
+                    <div className={`h-full transition-all ${(currentWeightKg / maxCapacityKg) > 0.9 ? "bg-destructive" : (currentWeightKg / maxCapacityKg) > 0.7 ? "bg-amber-500" : "bg-emerald-500"}`} style={{ width: `${Math.min(100, (currentWeightKg / Math.max(1, maxCapacityKg)) * 100)}%` }} />
+                  </div>
+                </div>
                 {cameraOn && (
                   <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2">
                     <label htmlFor="interval" className="text-xs text-muted-foreground">Live interval</label>
                     <div className="flex items-center gap-2">
-                      <input id="interval" type="range" min={2} max={15} step={1} value={intervalSec} onChange={(e) => setIntervalSec(Number(e.target.value))} className="w-32" />
+                      <input id="interval" type="range" min={2} max={15} step={1} value={intervalSec} onChange={e => setIntervalSec(Number(e.target.value))} className="w-32" />
                       <span className="w-10 text-right text-xs tabular-nums">{intervalSec}s</span>
                     </div>
                   </div>
                 )}
-
                 <button onClick={analyze} disabled={loading || !imageDataUrl || liveMode} className="w-full inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50">
                   {liveMode ? "Live analysis running…" : loading ? "Analyzing…" : "Run AI analysis"}
                 </button>
@@ -491,9 +515,9 @@ function Home() {
         </div>
 
         <section className="mt-12 grid gap-4 sm:grid-cols-3">
-          <HowItWorks step="1" title="See" body="Camera inside the lift cabin captures a frame when a new floor call comes in." />
+          <HowItWorks step="1" title="See" body="Camera captures a frame of the lift interior when a new floor call comes in." />
           <HowItWorks step="2" title="Estimate" body="AI estimates floor-space occupancy and visible people — not just weight." />
-          <HowItWorks step="3" title="Decide" body="If there's no room, the lift skips the call and saves everyone time." />
+          <HowItWorks step="3" title="Decide" body="Watch the animated lift stop and board a passenger, or skip and turn them away." />
         </section>
       </section>
 
@@ -508,20 +532,7 @@ function NumField({ id, label, value, onChange, min, max }: { id: string; label:
   return (
     <div>
       <label htmlFor={id} className="block text-[10px] uppercase tracking-widest text-muted-foreground">{label}</label>
-      <input id={id} type="number" min={min} max={max} value={value} onChange={(e) => onChange(Number(e.target.value) || 0)} className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm tabular-nums" />
-    </div>
-  );
-}
-
-function WeightBar({ current, max }: { current: number; max: number }) {
-  const pct = Math.min(100, Math.max(0, (current / Math.max(1, max)) * 100));
-  return (
-    <div>
-      <div className="flex items-baseline justify-between text-xs text-muted-foreground">
-        <span>Weight sensor</span>
-        <span className="tabular-nums">{current} / {max} kg ({Math.round(pct)}%)</span>
-      </div>
-      <Bar percent={pct} />
+      <input id={id} type="number" min={min} max={max} value={value} onChange={e => onChange(Number(e.target.value) || 0)} className="mt-1 w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm tabular-nums" />
     </div>
   );
 }
